@@ -1,0 +1,5 @@
+easy compile command \
+
+gcc -std=c11 -Wall -Wextra -Wpedantic -g -O0 test.c -o test
+
+gcc -Wall -Wextra -O2 test.c -o test && ./test

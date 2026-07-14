@@ -1,0 +1,652 @@
+ ▐▛███▜▌   Claude Code v2.1.203
+▝▜█████▛▘  Opus 4.8 · Claude Pro
+  ▘▘ ▝▝    ~/Code/Exercise19_FDTD
+
+  ✔ Using flicker-free rendering · if you want to go back, use /tui default
+    · Click to move your cursor in the text input
+    · Click to expand collapsed tool results
+    · By default, text auto-copies when you select it (/config to change)
+    · Hold Shift while selecting to use your terminal's native copy instead
+
+ ▎ Extended: Fable 5 is included in your weekly limit
+ ▎ Through July 12, you can use up to 50% of your weekly usage limit on Fable 5. If you hit your limit, you can continue on Fable 5 with usage credits. Fable 5 draws down usage faster than Opus 4.8. Run /model and select Fable to use it. Learn more
+
+❯ <ide_opened_file>The user opened the file                                     
+  /home/paris/Code/Exercise19_FDTD/Debye.c in the IDE. This may or may not be   
+  related to the current task.</ide_opened_file>                                
+
+❯ claude i copied the Debye.c in a file called Drude.c . Take the drude update  
+  equations from the file. Anything else keep the same and we want the process  
+  to produce the reflection coefficient in the same way .                       
+
+● I'll start by reading the relevant files to understand the current
+  implementation before making changes.
+
+  Read 3 files (ctrl+o to expand)
+
+● Now I have a complete picture. Both files are byte-identical (the copy
+  worked), and I can see exactly how the Debye ADE is wired in. Let me map what
+  actually has to change.
+
+  ★ Insight ─────────────────────────────────────
+  The Debye and Drude ADE updates are structurally almost identical — the book
+  even says so (around eq. 10.56). Comparing the two derivations, only three
+  things differ:
+  1. Coefficient Cje — Debye (10.41) uses εd/(η₀Sc); Drude (10.58) uses
+  2π²Sc/(η₀Np²). (Cjj keeps the exact same form, 10.40 ≡ 10.57.)
+  2. Sign of Cje in the E-update numerator — Debye ca has +Cje·η₀Sc/(2ε∞)
+  (10.47); Drude flips it to − (10.62).
+  3. Sign of old-E in the polarization-current update — Debye uses (E^{q+1} − 
+  E^q) (10.39); Drude uses (E^{q+1} + E^q) (10.56).
+
+  Everything else — the H update, Mur ABCs, source, two-run
+  reference-subtraction, FFT, gating — is reused verbatim. The Drude model also
+  needs two new physical inputs that Debye didn't: a plasma frequency (entering
+  via Np, points-per-wavelength at ωp) and a damping g = 1/(Ng·Δt).
+  ─────────────────────────────────────────────────
+
+  One thing I need to flag about "produce the reflection coefficient in the same
+  way": the extraction process (reference subtraction → FFT ratio → gating)
+  I'll keep byte-for-byte. But the analytic comparison curve inside
+  write_reflection is currently the Debye permittivity ε∞ + εd/(1+jωτ). If I
+  simulate Drude but compare against a Debye curve, the analytic column becomes
+  physically meaningless. So I'll swap that one formula to the Drude
+  permittivity (eq. 10.17), ε∞ − ωp²/(ω²−jgω), so the validation still works.
+  I'll note this clearly.
+
+  Let me make the edits.
+
+● Update(Drude.c)
+  ⎿  Added 2 lines, removed 2 lines
+      10  
+      11  #define SIZE 800       /* large grid: pushes the far boundary w
+          ell away      */
+      12  #define MAXTIME 2048   /* power of two so the radix-2 FFT needs
+           no padding;
+      13 -                          doubled with Nt to keep the Debye kne
+         -e resolved    */                                               
+      13 +                          long record keeps the Drude plasma ed
+         +ge resolved   */                                               
+      14  #define SOURCE 50      /* additive (soft) source cell          
+                       */
+      15  #define PROBE 100      /* free-space probe, in front of the int
+          erface       */
+      16 -#define INTERFACE 120  /* free space | Debye half-space boundar
+         -y (cells 120..SIZE-1) */                                       
+      16 +#define INTERFACE 120  /* free space | Drude half-space boundar
+         +y (cells 120..SIZE-1) */                                       
+      17  #define SNAPSHOT_INTERVAL 10
+      18  #define SNAPSHOT_DIR "snapshots"
+      19  
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● Update(Drude.c)
+  ⎿  Added 4 lines, removed 3 lines
+      29  
+      30      /* physics constants (you chose: keep them in the struct) *
+          /
+      31      int    maxTime;
+      32 -    int    Nt;                                                 
+      32 +    int    Nt;       /* Drude damping in time steps: g = 1/(Nt*
+         +dt) (the "Ng") */                                              
+      33 +    int    Np;       /* points per wavelength at the plasma fre
+         +quency         */                                              
+      34      double imp0;     /* impedance of free space            */
+      34 -    double e_d;      /* relative permittivity of material  */  
+      35 +    double e_d;      /* (unused for Drude; kept from the Debye 
+         +template)      */                                              
+      36      double sigma;    /* conductivity of the material       */
+      37      double Sc;       /* Courant number                     */
+      38      double dt;
+     ...
+      41      double eps0;     /* permittivity of free space         */
+      42      double eps_inf;  /* high-frequency permittivity        */
+      43  
+      43 -    int    dispersive; /* 0 = free space, 1 = Debye dispersive 
+         -slab */                                                        
+      44 +    int    dispersive; /* 0 = free space, 1 = Drude dispersive 
+         +slab */                                                        
+      45  } Simulation;
+      46  
+      47  /* Fill a freshly-created Simulation with its initial values.
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● Update(Drude.c)
+  ⎿  Added 4 lines, removed 2 lines
+      51  
+      52      /* --- scalars --- */
+      53      sim->maxTime  = MAXTIME;
+      54 -    sim->Nt       = 100;     /* relaxation time tau = Nt*dt; la
+         -rger => lower Debye knee */                                    
+      54 +    sim->Nt       = 100;     /* Drude damping: g = 1/(Nt*dt); l
+         +arger Nt => lower loss */                                      
+      55 +    sim->Np       = 30;      /* points/wavelength at the plasma
+         + frequency:                                                    
+      56 +                                omega_p = 2*pi/Np (normalized) 
+         +~= 0.21 rad/step      */                                       
+      57      sim->imp0     = 377.0;
+      56 -    sim->e_d      = 4.0;                                       
+      58 +    sim->e_d      = 4.0;     /* unused by the Drude model (kept
+         + from the template)   */                                       
+      59      sim->sigma    = 0.0;
+      60      sim->Sc       = 1.0;
+      61      sim->dt       = 1.0;
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● Now the core coefficient block — the Cje formula, the right ABC, and the sign
+  flip in the ca numerator:
+
+● Update(Drude.c)
+  ⎿  Added 20 lines, removed 10 lines
+       82         ca = 1, cb = imp0 * Sc, cjj = cje = 0, so we are done. 
+           Only insert the
+       83         Debye slab when dispersion is requested. */
+       84      if (sim->dispersive) {
+       85 -        /* The right boundary now sits inside the Debye medium
+          -. Match the Mur                                               
+       86 -           ABC to the low-frequency index n = sqrt(eps_s) so t
+          -he transmitted                                                
+       87 -           baseband pulse is absorbed instead of reverberating
+          - back. */                                                     
+       88 -        sim->right_abc_coef = (sim->Sc - sqrt(sim->e_d)) / (si
+          -m->Sc + sqrt(sim->e_d));                                      
+       85 +        /* The right boundary now sits inside the Drude medium
+          +. Above the plasma                                            
+       86 +           frequency the transmitted wave propagates with inde
+          +x n = sqrt(eps_inf),                                          
+       87 +           so match the Mur ABC to that index. (Below omega_p 
+          +the field is                                                  
+       88 +           evanescent and the late-time gate removes any far-b
+          +oundary echo                                                  
+       89 +           anyway, so this choice is not critical.) */        
+       90 +        sim->right_abc_coef =                                 
+       91 +            (sim->Sc - sqrt(sim->eps_inf)) / (sim->Sc + sqrt(s
+          +im->eps_inf));                                                
+       92  
+       90 -        /* Debye half-space: override cjj / cje for every cell
+          - from the                                                     
+       91 -           interface to the end of the grid */                
+       93 +        /* Drude half-space: override cjj / cje for every cell
+          + from the                                                     
+       94 +           interface to the end of the grid.  Eqs. (10.57)-(10
+          +.58):                                                         
+       95 +             Cjj = (1 - 1/(2Ng)) / (1 + 1/(2Ng))           (sa
+          +me form as Debye)                                             
+       96 +             Cje = [1 / (1 + 1/(2Ng))] * 2*pi^2*Sc / (eta0 * N
+          +p^2)                                                          
+       97 +           with Ng = sim->Nt (damping in time steps) and Np = 
+          +points per                                                    
+       98 +           wavelength at the plasma frequency. */             
+       99          for (int i = 0; i < SIZE; i++) {
+      100              if (i >= INTERFACE) {
+      101                  sim->cjj[i] = (1.0 - 0.5 / sim->Nt) / (1.0 + 0
+           .5 / sim->Nt);
+       95 -                sim->cje[i] = ((sim->e_d - sim->eps_inf) / (si
+          -m->imp0 * sim->Sc))                                           
+       96 -                              * (1.0 / sim->Nt) / (1.0 + 0.5 /
+          - sim->Nt);                                                    
+      102 +                sim->cje[i] = (1.0 / (1.0 + 0.5 / sim->Nt))   
+      103 +                              * (2.0 * M_PI * M_PI * sim->Sc) 
+      104 +                              / (sim->imp0 * (double)sim->Np *
+          + (double)sim->Np);                                            
+      105              }
+      106          }
+      107  
+      100 -        /* ca / cb inside the material (depend on cje set abov
+          -e) */                                                         
+      108 +        /* ca / cb inside the material (depend on cje set abov
+          +e).  Eq. (10.62):                                             
+      109 +           the ONLY change from the Debye form (10.47) is the 
+          +MINUS sign on the                                             
+      110 +           Cje term in the numerator of ca; the denominator is
+          + unchanged. */                                                
+      111          for (int i = 0; i < SIZE; i++) {
+      112              if (i >= INTERFACE) {
+      113                  sim->denom[i] =
+     ...
+      119                      (
+      120                            1.0
+      121                          - (sim->sigma * sim->dt) / (2.0 * sim-
+           >eps_inf * sim->eps0)
+      112 -                        + (sim->cje[i] * sim->imp0 * sim->Sc) 
+          -/ (2.0 * sim->eps_inf)                                        
+      122 +                        - (sim->cje[i] * sim->imp0 * sim->Sc) 
+          +/ (2.0 * sim->eps_inf)                                        
+      123                      ) / sim->denom[i];
+      124  
+      125                  sim->cb[i] = (sim->imp0 * sim->Sc / sim->eps_i
+           nf) / sim->denom[i];
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● Those "no field Np" errors look like a stale LSP parse (I did add Np to the
+  struct). The gcc compiler is authoritative — let me finish the remaining two
+  edits, then build to get ground truth.
+
+  Next, the polarization-current update sign (the + old_ez flip):
+
+● Update(Drude.c)
+  ⎿  Added 3 lines, removed 2 lines
+      150                                   - 0.5 * (1.0 + sim->cjj[mm]) 
+           * sim->jp[mm]);
+      151          }
+      152  
+      153 -        /* polarization current update */                     
+      153 +        /* polarization current update (Drude, eq. 10.56): not
+          +e the PLUS sign on                                            
+      154 +           the old electric field, where the Debye update (10.
+          +39) used a minus. */                                          
+      155          for (mm = 0; mm < SIZE; mm++) {
+      156              sim->jp[mm] = sim->cjj[mm] * sim->jp[mm]
+      156 -                        + sim->cje[mm] * (sim->ez[mm] - sim->o
+          -ld_ez[mm]);                                                   
+      157 +                        + sim->cje[mm] * (sim->ez[mm] + sim->o
+          +ld_ez[mm]);                                                   
+      158          }
+      159  
+      160          /* first-order Mur ABC on both ends (right one matched
+            to the medium) */
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● Now the analytic comparison — swap the Debye permittivity for the Drude
+  permittivity (eq. 10.17), keeping the extraction process identical. First the
+  doc comment:
+
+● Update(Drude.c)
+  ⎿  Added 6 lines, removed 4 lines
+      241  }
+      242  
+      243  /* Extract the reflection coefficient by comparing the two run
+           s, and put it
+      244 -   side by side with the analytic Debye/Fresnel result.       
+      244 +   side by side with the analytic Drude/Fresnel result.       
+      245  
+      246 -   Method (reference subtraction):                            
+      246 +   Method (reference subtraction) -- IDENTICAL to the Debye te
+          +mplate:                                                       
+      247       incident   E_inc(t)  = ref->saved          (free-space ru
+           n, probe field)
+      248       reflected  E_ref(t)  = mat->saved - ref->saved
+      249       Gamma_sim(w)         = FFT(E_ref) / FFT(E_inc)
+      250  
+      251 -   Analytic single-interface Fresnel reflection for free space
+          - -> Debye:                                                    
+      252 -     eps_r(w) = eps_inf + (eps_s - eps_inf) / (1 + j w tau)   
+      251 +   Analytic single-interface Fresnel reflection for free space
+          + -> Drude:                                                    
+      252 +     eps_r(w) = eps_inf - omega_p^2 / (w^2 - j g w)        (eq
+          +. 10.17)                                                      
+      253       n(w)     = sqrt(eps_r(w))
+      254       Gamma(w) = (n - 1) / (n + 1)
+      255 +   where (normalized: Sc = dt = delta = 1 => c = 1)           
+      256 +     omega_p = 2*pi/Np      and      g = 1/(Nt*dt).           
+      257  
+      258     Writes:  freq  omega  |Gamma_sim|  |Gamma_analytic|   to `f
+           ilename`. */
+      259  void write_reflection(const Simulation *ref, const Simulation 
+           *mat,
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● Update(Drude.c)
+  ⎿  Added 5 lines, removed 3 lines
+      297      }
+      298      double threshold = 1e-2 * inc_peak;   /* only compare bins
+            with real incident energy */
+      299  
+      300 -    /* Debye parameters taken from the material run (dt = 1 =>
+          - tau = Nt) */                                                 
+      300 +    /* Drude parameters taken from the material run.  In these
+          + normalized units                                             
+      301 +       (Sc = dt = delta = 1 => c = 1) the plasma frequency in 
+          +rad/step is                                                   
+      302 +       omega_p = 2*pi/Np, and the damping is g = 1/(Nt*dt). */
+      303      double eps_inf = mat->eps_inf;
+      302 -    double eps_s   = mat->e_d;                                
+      303 -    double tau     = mat->Nt * mat->dt;                       
+      304 +    double omega_p = 2.0 * M_PI / (double)mat->Np;            
+      305 +    double g       = 1.0 / (mat->Nt * mat->dt);               
+      306  
+      307      FILE *f = fopen(filename, "w");
+      308      if (f == NULL) {
+  ⎿  Found 4 new diagnostic issues in 1 file (ctrl+o to expand)
+
+● Now the eps_r computation that still references the removed eps_s/tau:
+
+● Update(Drude.c)  ⎿  Added 2 lines, removed 1 line
+      320  
+      321          double gamma_sim = cabs(refl[k] / inc[k]);
+      322  
+      323 -        double complex eps_r = eps_inf + (eps_s - eps_inf) / (
+          -1.0 + I * omega * tau);                                       
+      323 +        double complex eps_r =                                
+      324 +            eps_inf - (omega_p * omega_p) / (omega * omega - I
+          + * g * omega);                                                
+      325          double complex nidx  = csqrt(eps_r);
+      326          double gamma_an = cabs((nidx - 1.0) / (nidx + 1.0));
+      327  
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● Those diagnostics are stale (referencing the line I just fixed). Let me finish
+  the two cosmetic comment updates in main(), then compile to get authoritative
+  results:
+
+● Update(Drude.c)
+  ⎿  Added 1 line, removed 1 line
+      334  int main(void) {
+      335      /* two independent runs from the same build */
+      336      Simulation free_sim;   /* dispersive = 0 : pure free space
+                 */
+      337 -    Simulation disp_sim;   /* dispersive = 1 : Debye half-spac
+          -e     */                                                      
+      337 +    Simulation disp_sim;   /* dispersive = 1 : Drude half-spac
+          +e     */                                                      
+      338  
+      339      init_params(&free_sim, 0);
+      340      init_params(&disp_sim, 1);
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● Update(Drude.c)
+  ⎿  Added 1 line, removed 1 line
+      346      compute_spectrum(free_sim.saved, free_sim.maxTime, "spectr
+           um_free.dat");
+      347      compute_spectrum(disp_sim.saved, disp_sim.maxTime, "spectr
+           um_disp.dat");
+      348  
+      349 -    /* reflection coefficient: simulated vs. analytic Debye/Fr
+          -esnel */                                                      
+      349 +    /* reflection coefficient: simulated vs. analytic Drude/Fr
+          +esnel */                                                      
+      350      write_reflection(&free_sim, &disp_sim, "reflection.dat");
+      351  
+      352      /* DEBUG: raw probe time series (no FFT) to inspect for a 
+           DC tail */
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● Now let me compile (authoritative check) and run it:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Clean build, no warnings (the lone LSP gripe about errno.h is pre-existing).
+  The "no field Np" errors were indeed a stale parse. Let me inspect the output
+  to verify the Drude physics and the sim-vs-analytic agreement:
+
+  Read 1 file (ctrl+o to expand)
+
+● The physics is exactly right, and the agreement is excellent.
+
+  ★ Insight ─────────────────────────────────────
+  The reflection curve is textbook Drude behavior, which validates the port:
+  - Below the plasma edge (ω ≲ 0.13): |Γ| ≈ 0.95 — a Drude medium with εᵣ < 0 is
+  highly reflective (like a metal below its plasma frequency).
+  - Sharp plasma edge near ω ≈ 0.148 — this is exactly ω = ωₚ/√ε∞ = 0.2094/√2,
+  where εᵣ crosses zero.
+  - Reflection null near ω ≈ 0.20 — exactly where εᵣ = 1 (so n = 1, perfect
+  match), i.e. ω = ωₚ. Then |Γ| climbs back toward the high-frequency Fresnel
+  value (√2−1)/(√2+1) ≈ 0.172.
+
+  Mean |Γ_sim − Γ_analytic| = 0.0033 over 140 bins — the FDTD Drude
+  implementation tracks the analytic Fresnel/Drude curve to ~0.3%. The tiny
+  systematic offset above the edge is the usual grid-dispersion + Mur-ABC
+  residue.
+  ─────────────────────────────────────────────────
+
+  Now let me regenerate the plot. First a couple of cosmetic label updates so
+  the figure says "Drude", then I'll run it:
+
+● Update(plot_reflection.py)
+  ⎿  Added 2 lines, removed 2 lines
+       2  Debye/Fresnel result.
+       3  
+       4  The heavy lifting (FDTD run, reference subtraction, FFT, and th
+          e analytic
+       5 -Gamma) all happen in Debye.c, which writes reflection.dat with 
+         -columns:                                                       
+       5 +Gamma) all happen in Drude.c, which writes reflection.dat with 
+         +columns:                                                       
+       6  
+       7      freq   omega   |Gamma_sim|   |Gamma_analytic|
+       8  
+       9  This script only reads that table and draws the comparison. Run
+           the C program
+      10 -first:  ./debye   (or gcc -Wall -o debye Debye.c -lm && ./debye
+         -)                                                              
+      10 +first:  ./drude   (or gcc -Wall -o drude Drude.c -lm && ./drude
+         +)                                                              
+      11  """
+      12  
+      13  from pathlib import Path
+
+● Update(plot_reflection.py)
+  ⎿  Added 1 line, removed 1 line
+      49  
+      50      ax.set_xlabel(r"angular frequency $\omega$  [rad / time ste
+          p]")
+      51      ax.set_ylabel(r"reflection coefficient  $|\Gamma|$")
+      52 -    ax.set_title("Debye half-space: simulated vs. analytic refl
+         -ection coefficient")                                           
+      52 +    ax.set_title("Drude half-space: simulated vs. analytic refl
+         +ection coefficient")                                           
+      53      ax.set_ylim(0.0, max(0.5, float(g_sim.max()) * 1.1))
+      54      ax.grid(True, alpha=0.3)
+      55      ax.legend(loc="upper right")
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The autograd conda env had numpy/matplotlib and regenerated the plot (mean
+  error 0.0033, matching the C output). Let me view it to confirm:
+
+  Read 1 file (ctrl+o to expand)
+
+● Done. Drude.c now runs the Drude ADE model, and the FDTD points land right on
+  the analytic Fresnel/Drude curve — including the sharp plasma edge at ω ≈ 0.15
+  and the reflection null at ω ≈ ωₚ ≈ 0.21.
+
+  What I changed (and what I kept)
+
+  I took only the Drude update equations from the chapter; everything in the
+  pipeline — H update, Mur ABCs, source, two-run reference subtraction, FFT,
+  gating, thresholding — is untouched.
+
+  The three substantive update-equation changes (Drude.c):
+
+  1. Cje coefficient (eq. 10.58 instead of 10.41): now [1/(1+1/(2Ng))] · 
+  2π²Sc/(η₀·Np²). Cjj is unchanged — it has the identical form in both models
+  (10.40 ≡ 10.57).
+  2. Sign flip in the E-update numerator (eq. 10.62 vs 10.47): the
+  Cje·η₀Sc/(2ε∞) term in ca goes from + to −. Denominator unchanged.
+  3. Sign flip in the polarization-current update (eq. 10.56 vs 10.39): cje·(ez 
+  + old_ez) instead of cje·(ez − old_ez) at Drude.c:153.
+
+  Two supporting changes the Drude model requires:
+
+  - New physical inputs: added Np (points-per-wavelength at the plasma frequency
+  → ωₚ = 2π/Np) and repurposed Nt as the damping steps Ng (g = 1/(Nt·dt)).
+  Defaults: Np=30, Nt=100, eps_inf=2, sigma=0. The old e_d field is kept but
+  unused.
+  - Right Mur ABC matched to √ε∞ (the Drude transmitting index) instead of √εₛ.
+
+  The one judgment call worth flagging: the analytic comparison curve in
+  write_reflection had to switch from the Debye permittivity to the Drude one,
+  εᵣ(ω) = ε∞ − ωₚ²/(ω² − jgω) (eq. 10.17) — otherwise you'd be validating Drude
+  FDTD against a Debye curve. The extraction process itself (FFT ratio of
+  reflected/incident) is byte-for-byte the same.
+
+  Verification
+
+  - gcc -Wall -O2 -o drude Drude.c -lm → builds clean, no warnings.
+  - ./drude → wrote reflection.dat, spectrum_*.dat.
+  - Mean |Γ_sim − Γ_analytic| = 0.0033 over 140 bins.
+
+  To tune the physics, the two knobs are sim->Np (lower Np → higher plasma
+  frequency, pushes the edge right) and sim->Nt (larger → less damping, sharper
+  edge) in init_params.
+
+  One note: to render the plot I used your autograd conda env, since the base
+  env and ai_physics env don't have numpy/matplotlib installed.
+
+❯ how can i plot the debye.c reflection ?                                       
+
+● Good question — and there's a subtlety worth surfacing. Let me check the
+  current state first.
+
+  Read 1 file (ctrl+o to expand)
+
+● Here's the catch: both Debye.c and Drude.c write to the same reflection.dat 
+  and the same reflection.png, and I hardcoded the plot title to "Drude"
+  earlier. So a naive ./debye && python plot_reflection.py would overwrite your
+  Drude reflection.png and mislabel the figure "Drude".
+
+  The clean fix is to parametrize the plot script so it can plot either model
+  without clobbering or mislabeling. Let me do that:
+
+● Update(plot_reflection.py)
+  ⎿  Added 24 lines, removed 10 lines
+       1  """Overlay the FDTD-extracted reflection coefficient against th
+          e analytic
+       2 -Debye/Fresnel result.                                          
+       2 +Fresnel result.                                                
+       3  
+       4  The heavy lifting (FDTD run, reference subtraction, FFT, and th
+          e analytic
+       5 -Gamma) all happen in Drude.c, which writes reflection.dat with 
+         -columns:                                                       
+       5 +Gamma) all happen in the C program (Debye.c or Drude.c), which 
+         +writes                                                         
+       6 +reflection.dat with columns:                                   
+       7  
+       8      freq   omega   |Gamma_sim|   |Gamma_analytic|
+       9  
+       9 -This script only reads that table and draws the comparison. Run
+         - the C program                                                 
+      10 -first:  ./drude   (or gcc -Wall -o drude Drude.c -lm && ./drude
+         -)                                                              
+      10 +This script only reads that table and draws the comparison. Bot
+         +h C programs                                                   
+      11 +write the SAME reflection.dat, so plot each one right after you
+         + run it:                                                       
+      12 +                                                               
+      13 +    # Debye                                                    
+      14 +    gcc -Wall -o debye Debye.c -lm && ./debye                  
+      15 +    python plot_reflection.py reflection.dat reflection_debye.p
+         +ng Debye                                                       
+      16 +                                                               
+      17 +    # Drude                                                    
+      18 +    gcc -Wall -o drude Drude.c -lm && ./drude                  
+      19 +    python plot_reflection.py reflection.dat reflection_drude.p
+         +ng Drude                                                       
+      20 +                                                               
+      21 +With no arguments it defaults to reflection.dat -> reflection.p
+         +ng.                                                            
+      22  """
+      23  
+      24 +import sys                                                     
+      25  from pathlib import Path
+      26  
+      27  import numpy as np
+     ...
+      30  matplotlib.use("Agg")
+      31  import matplotlib.pyplot as plt
+      32  
+      21 -DATA = Path("reflection.dat")                                  
+      22 -OUT = Path("reflection.png")                                   
+      33  
+      24 -                                                               
+      34  def main() -> None:
+      26 -    if not DATA.exists():                                      
+      27 -        raise SystemExit(f"{DATA} not found - build and run Deb
+         -ye.c first")                                                   
+      35 +    # optional positional args: <data.dat> <out.png> <model-lab
+         +el>                                                            
+      36 +    data = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("re
+         +flection.dat")                                                 
+      37 +    out = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("ref
+         +lection.png")                                                  
+      38 +    model = sys.argv[3] if len(sys.argv) > 3 else "Dispersive" 
+      39  
+      29 -    freq, omega, g_sim, g_an = np.loadtxt(DATA, comments="#", u
+         -npack=True)                                                    
+      40 +    if not data.exists():                                      
+      41 +        raise SystemExit(f"{data} not found - build and run Deb
+         +ye.c / Drude.c first")                                         
+      42  
+      43 +    freq, omega, g_sim, g_an = np.loadtxt(data, comments="#", u
+         +npack=True)                                                    
+      44 +                                                               
+      45      fig, ax = plt.subplots(figsize=(9, 5.5), constrained_layout
+          =True)
+      46      ax.plot(
+      47          omega,
+
+● The important diagnostics: OUT is still referenced at the bottom, and the
+  title still hardcodes "Drude". Let me fix those to use the new out/model
+  locals:
+
+● Update(plot_reflection.py)
+  ⎿  Added 1 line, removed 1 line
+      63  
+      64      ax.set_xlabel(r"angular frequency $\omega$  [rad / time ste
+          p]")
+      65      ax.set_ylabel(r"reflection coefficient  $|\Gamma|$")
+      66 -    ax.set_title("Drude half-space: simulated vs. analytic refl
+         -ection coefficient")                                           
+      66 +    ax.set_title(f"{model} half-space: simulated vs. analytic r
+         +eflection coefficient")                                        
+      67      ax.set_ylim(0.0, max(0.5, float(g_sim.max()) * 1.1))
+      68      ax.grid(True, alpha=0.3)
+      69      ax.legend(loc="upper right")
+● Update(plot_reflection.py)
+  ⎿  Added 2 lines, removed 2 lines
+      68      ax.grid(True, alpha=0.3)
+      69      ax.legend(loc="upper right")
+      70  
+      71 -    fig.savefig(OUT, dpi=160)                                  
+      71 +    fig.savefig(out, dpi=160)                                  
+      72      plt.close(fig)
+      73  
+      74      err = np.mean(np.abs(g_sim - g_an))
+      75 -    print(f"wrote {OUT}")                                      
+      75 +    print(f"wrote {out}")                                      
+      76      print(f"mean |Gamma_sim - Gamma_analytic| = {err:.4f} over 
+          {len(omega)} bins")
+      77  
+      78  
+
+● Now let me build Debye, run it, and plot to a Debye-named file (so it won't
+  clobber your Drude figure):
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● There's your Debye reflection: reflection_debye.png. It's the classic
+  Debye/Fresnel shape — |Γ| ≈ 1/3 at low frequency (the DC index n = √εₛ = √4 = 
+  2) rolling down to ≈ 0.172 at high frequency (n = √ε∞ = √2), a monotonic
+  relaxation with no plasma edge. Agreement is 0.0039.
+
+  The recipe
+
+  I made plot_reflection.py take optional arguments so it works for either
+  model:
+
+  python plot_reflection.py <data.dat> <out.png> <model-label>
+
+  So to plot Debye:
+
+  gcc -Wall -O2 -o debye Debye.c -lm && ./debye        # writes reflection.dat
+  python plot_reflection.py reflection.dat reflection_debye.png Debye
+
+  Two things to be aware of, which is why I passed explicit arguments rather
+  than relying on defaults:
+
+  1. Debye.c and Drude.c both write the same reflection.dat. Whichever binary
+  you run last owns that file. Each .dat already contains the right analytic 
+  column for its model (Debye's is ε∞ + εd/(1+jωτ), Drude's is ε∞ − 
+  ωp²/(ω²−jgω)), so just plot right after you run — don't run one binary and
+  plot expecting the other. Writing to reflection_debye.png /
+  reflection_drude.png keeps the two figures side by side.
+  2. Python env: your base and ai_physics conda envs don't have
+  numpy/matplotlib; the autograd env does. Plain python plot_reflection.py fails
+  with ModuleNotFoundError. Use:
+  ~/miniconda3/envs/autograd/bin/python plot_reflection.py reflection.dat
+  reflection_debye.png Debye
+  2. (or conda activate autograd first).
+
+  With no arguments it still defaults to reflection.dat → reflection.png (title
+  "Dispersive"), so nothing breaks if you run it bare.

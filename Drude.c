@@ -1,4 +1,4 @@
-// Compile and run: gcc -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow Debye.c -lm -o Debye && ./Debye
+// Compile and run: gcc -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow Drudee.c -lm -o Drude && ./Drude
 
 #include <stdio.h>
 #include <math.h>
@@ -36,7 +36,9 @@ struct Constants {
     double abc_coef;
     double eps0;
     double eps_inf;
-
+    double Ng;
+    double pi;
+    double Np; 
 };
 
 void initialize_constant(struct Constants *constants) {
@@ -49,22 +51,31 @@ void initialize_constant(struct Constants *constants) {
     constants->abc_coef = (constants->Sc - 1.0) / (constants->Sc + 1.0);
     constants->eps0 = 8.854187817e-12;
     constants->eps_inf = 2.0;
+    constants->Ng = 50; 
+    constants->pi = acos(-1.0); 
+    constants->Np = 20;
 }
 
 
 void initialize_grid(const struct Constants *constants, struct Data *data, int dispersive) {
     if(dispersive) {
+        double A = (0.5/constants->Ng); 
+        double B = (2*pow(constants->pi, 2) * constants->Sc) / (constants->imp0 * pow(constants->Np,2)) ; 
+
+        double L = (constants->sigma * constants->dt) / (2 * constants->eps_inf * constants->eps0);
+        double N = (constants->imp0 * constants->Sc)/(constants->eps_inf);
 
         for( int i=DISPERSION_LAYER; i<DISPERSION_LAYER_END; i++){
-            data->cjj[i] = (1.0 - 0.5 / constants->Nt) / (1.0 + 0.5 / constants->Nt);
-            data->cje[i] = ( (1.0 / constants->Nt) / (1.0 + 0.5 / constants->Nt) ) * ( constants->e_d / ( constants->imp0 * constants->Sc ) );
+            
+            
+            data->cjj[i] = (1.0 - A)/(1.0 + A);
+            data->cje[i] = B / ( 1.0 + A);
 
-            double L = (constants->sigma * constants->dt / (2.0 * constants->eps_inf * constants->eps0));
-            double P =  (data->cje[i] * constants->imp0 * constants->Sc) / ( 2.0 * constants->eps_inf);
-            double D = 1.0 + L + P ;
+            double M = (data->cje[i] * constants->imp0 * constants->Sc) / ( 2.0 * constants->eps_inf);          
+            double D = 1.0 + L + M ;
 
-            data->ca[i] = (1.0 - L + P) / D;
-            data->cb[i] =  (constants->imp0 * constants->Sc / constants->eps_inf) / D;
+            data->ca[i] = (1.0 - L - M) / D;
+            data->cb[i] = N / D ;
         }
 
         for (int i=0; i<DISPERSION_LAYER; i++) {
@@ -118,7 +129,7 @@ void run_simulation(struct Data *data, const struct Constants *constants) {
 
         //polarization current update
         for (int mm=0; mm<SIZE; mm++) {
-            data->jp[mm] = data->cjj[mm] * data->jp[mm] + data->cje[mm] * (data->ez[mm] - data->old_ez[mm]);
+            data->jp[mm] = data->cjj[mm] * data->jp[mm] + data->cje[mm] * (data->ez[mm] + data->old_ez[mm]);
         }
 
         /* first-order ABC for ez[0], simple ABC for ez[SIZE-1] */
@@ -282,18 +293,20 @@ int main(){
         e_r = eps_inf + e_d / (1 + (ωτ)^2) - j e_d (ωτ) / (1 + (ωτ)^2)
     */
 
-    double tau = constants.Nt * constants.dt;
+  
     double gamma_analytic[k_bins];
-    for(int k=0; k<k_bins; k++){
+    double omega_p = 2.0 * pi * constants.Sc / ( constants.Np * constants.dt) ;
+    double g = 1.0 / (constants.Ng * constants.dt);
+    for(int k=1; k<k_bins; k++){
       double omega = 2*pi*k / (MAX_TIME * constants.dt);
-      double complex eps_r = constants.eps_inf + constants.e_d / (1.0 + I * omega * tau);
+      double complex eps_r = constants.eps_inf - pow(omega_p,2) / (pow(omega, 2) - I * omega * g);
       double complex refractive_index = csqrt(eps_r);
       gamma_analytic[k] = cabs((1.0 - refractive_index) / (1.0 + refractive_index));
     }
 
     int counter = 0 ;
     double delta = 0.0 ;
-    for(int k=0; k<k_bins; k++)
+    for(int k=1; k<k_bins; k++)
     {
        if(!isnan(gamma_simulated[k])){
          delta += fabs(gamma_simulated[k] - gamma_analytic[k]);
